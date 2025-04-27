@@ -20,11 +20,11 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        /* Add some basic styles for table layout */
+        /* Basic styles for table layout */
         #chunk-table th, #chunk-table td {
             padding: 0.5rem; /* p-2 */
             border: 1px solid #d1d5db; /* border border-gray-300 */
-            vertical-align: top;
+            vertical-align: top; /* Align content to top */
         }
         #chunk-table th {
             background-color: #f3f4f6; /* bg-gray-100 */
@@ -33,6 +33,7 @@
         }
         .text-right { text-align: right; }
         .hidden { display: none; }
+        /* Styles for the hex dump <pre> tag */
         pre {
             white-space: pre-wrap; /* Allow wrapping */
             word-break: break-all; /* Break long words */
@@ -44,6 +45,11 @@
             border: 1px solid #e5e7eb; /* border border-gray-200 */
             max-height: 200px; /* Limit height */
             overflow-y: auto; /* Add scroll if needed */
+            margin: 0; /* Remove default margin if any */
+        }
+        /* Ensure table cells containing <pre> don't add extra padding */
+        #chunk-table td:has(pre) {
+             padding: 0.5rem; /* Maintain consistent padding */
         }
     </style>
 </head>
@@ -61,9 +67,7 @@
              <button id="analyze-button" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md transition duration-150 ease-in-out">Analyze PNG</button>
         </div>
 
-        <div id="message" class="mt-4 text-center text-sm text-red-600 font-medium"></div>
-
-        <div class="mt-6 overflow-x-auto">
+        <div id="message" class="mt-4 text-center text-sm text-red-600 font-medium min-h-[1.25rem]"></div> <div class="mt-6 overflow-x-auto">
             <table id="chunk-table" class="w-full border-collapse hidden">
                 <thead class="bg-gray-100">
                     <tr>
@@ -82,214 +86,6 @@
     </div>
 
     <script src="png.js"></script>
-
-    <script>
-        // Get references to DOM elements
-        const fileElem = document.getElementById("input-file");
-        const analyzeButton = document.getElementById("analyze-button");
-        const messageElem = document.getElementById("message");
-        const chunkTable = document.getElementById("chunk-table");
-        const chunkTableBody = chunkTable.querySelector("tbody");
-
-        // Set of chunk types for which to display a hex/ASCII dump
-        const CHUNK_TYPES_TO_DUMP = new Set(["gAMA", "sRGB", "pHYs", "iTXt", "tEXt", "zTXt", "tIME", "cHRM", "iCCP", "sBIT", "cICP", "bKGD", "hIST", "sPLT", "eXIf"]);
-
-        // --- PNG Parsing and Rendering Functions (Copied & adapted from png.js) ---
-        // Note: These functions rely on helper functions defined within png.js
-
-        // Takes the raw bytes of a PNG file, returns a list of chunk objects, throwing an exception if error.
-        function readPngChunks(bytes) {
-            // Check file signature (PNG_SIGNATURE is defined in png.js)
-            if (bytes.length < 8 || !bytes.subarray(0, 8).every((b, i) => (b === PNG_SIGNATURE[i])))
-                throw "Not a PNG file";
-
-            // Parse chunks
-            let chunks = [];
-            let index = 8;
-            while (index < bytes.length) {
-                // Parse chunk header
-                if (index + 8 > bytes.length)
-                    throw "Unexpected end of file (chunk header)";
-                // readUint32 is defined in png.js
-                let length = readUint32(bytes, index + 0);
-                if (length >= 0x80000000) // Check for potential overflow/error
-                    throw "Chunk length too large";
-                // readAscii is defined in png.js
-                let type = readAscii(bytes, index + 4, 4);
-                if (!/^[A-Za-z]{4}$/.test(type)) // Validate chunk type format
-                    throw "Chunk type has invalid characters";
-
-                // Check for sufficient data for chunk data and CRC
-                if (index + 8 + length + 4 > bytes.length)
-                    throw "Unexpected end of file (chunk data or CRC)";
-
-                // Get chunk data subarray
-                let data = bytes.subarray(index + 8, index + 8 + length);
-
-                // Parse and verify chunk CRC
-                let actualCrc = readUint32(bytes, index + 8 + length);
-                let typeBytes = new Uint8Array(4);
-                for (let i = 0; i < 4; i++)
-                    typeBytes[i] = type.charCodeAt(i);
-
-                // computeCrc is defined in png.js
-                let expectedCrc = computeCrc(typeBytes, data);
-                if (actualCrc !== expectedCrc) {
-                    console.warn(`Chunk CRC mismatch for ${type}: Expected ${formatHex(expectedCrc, 8)}, Got ${formatHex(actualCrc, 8)}`);
-                    // Decide whether to throw an error or just warn. The example site seems to continue.
-                    // throw "Chunk CRC mismatch";
-                }
-
-
-                // Store chunk information
-                chunks.push({
-                    type : type,
-                    length : length,
-                    data : data,
-                    offset : index,
-                    crc: actualCrc // Store the actual CRC read from file
-                });
-                index += 8 + length + 4; // Move to the next chunk
-
-                // Check for data after IEND chunk
-                if (type === "IEND" && index < bytes.length) {
-                    console.warn("Warning: File continues after IEND chunk");
-                    // Optionally break or stop processing here if desired
-                    // break;
-                }
-            }
-
-            // Check for essential chunks
-            if (chunks.length === 0 || chunks[0].type !== "IHDR")
-                throw "Missing or misplaced IHDR chunk (must be the first chunk)";
-            if (chunks[chunks.length - 1].type !== "IEND")
-                 console.warn("Warning: Missing IEND chunk or file truncated"); // Be more lenient than throwing error
-            let hasIdat = chunks.some(ch => (ch.type === "IDAT"));
-            if (!hasIdat)
-                throw "Missing IDAT chunk (no image data)";
-
-            return chunks;
-        }
-
-
-        // Renders the given list of chunk objects into the page DOM. Also requires the raw file bytes.
-        function renderChunks(chunks) {
-            messageElem.textContent = "File parsed successfully";
-            chunkTable.classList.remove("hidden");
-
-            // Clear previous results
-            while (chunkTableBody.firstChild) {
-                chunkTableBody.removeChild(chunkTableBody.firstChild);
-            }
-
-            // Get table header info (for mapping data keys to cells)
-            let headers = chunkTable.querySelector("thead tr").cells;
-            let colInfos = [];
-            for (let i = 0; i < headers.length; i++) {
-                colInfos.push({
-                    name: headers[i].dataset.key, // Get the key from data-key attribute
-                    isRight: headers[i].classList.contains("text-right")
-                });
-            }
-
-            // Iterate through each chunk and create a table row
-            for (const chunk of chunks) {
-                let row = chunkTableBody.insertRow();
-
-                // Create cells based on header info
-                let cells = {};
-                for (const info of colInfos) {
-                    let cell = row.insertCell();
-                    // Apply basic styling (Tailwind classes equivalent)
-                    cell.style.padding = '0.5rem';
-                    cell.style.border = '1px solid #d1d5db';
-                    cell.style.verticalAlign = 'top';
-                    if (info.isRight) {
-                        cell.style.textAlign = 'right';
-                    }
-                    cells[info.name] = cell; // Store cell reference by key
-                }
-
-                // Populate cells with chunk data
-                // formatNumber and formatHex are defined in png.js
-                cells.offset.textContent = formatNumber(chunk.offset);
-                cells.length.textContent = formatNumber(chunk.length);
-                cells.type.textContent = chunk.type;
-                cells.crc.textContent = formatHex(chunk.crc, 8); // Use the CRC read from the file
-
-                // Get and display chunk summary
-                let summary = "";
-                try {
-                    // summarizeChunk is defined in png.js
-                    summary = summarizeChunk(chunk);
-                } catch (e) {
-                    console.error(`Error summarizing chunk ${chunk.type}:`, e);
-                    summary = `Error: ${e.message || e.toString()}`; // Display error message
-                }
-                cells.summary.textContent = summary;
-
-                // Display data dump if the chunk type is in the set
-                if (CHUNK_TYPES_TO_DUMP.has(chunk.type)) {
-                    const dumpContent = dumpChunkData(chunk.data);
-                    // Use <pre> for better formatting of the dump
-                    const pre = document.createElement('pre');
-                    pre.textContent = dumpContent;
-                    cells.dump.appendChild(pre);
-                } else {
-                     cells.dump.textContent = '—'; // Indicate no dump for this type
-                }
-            }
-        }
-
-        // --- Event Listener Setup ---
-        analyzeButton.onclick = function() {
-            // Clear previous state
-            messageElem.textContent = "";
-            while (chunkTableBody.firstChild !== null)
-                chunkTableBody.removeChild(chunkTableBody.firstChild);
-            chunkTable.classList.add("hidden");
-
-            // Check if a file is selected
-            let files = fileElem.files;
-            if (files.length < 1) {
-                messageElem.textContent = "No file selected";
-                return;
-            }
-
-            // Use FileReader to read the file
-            let reader = new FileReader();
-
-            // Define what happens when the file is loaded
-            reader.onload = function() {
-                try {
-                    // Get file content as ArrayBuffer, then convert to Uint8Array
-                    let bytes = new Uint8Array(reader.result);
-                    // Parse the PNG chunks using the library function
-                    let chunks = readPngChunks(bytes);
-                    // Render the parsed chunks into the table
-                    renderChunks(chunks);
-                } catch (e) {
-                    // Display any errors that occur during parsing
-                    messageElem.textContent = `Error: ${e.message || e.toString()}`;
-                    console.error("PNG Parsing Error:", e);
-                }
-            };
-
-            // Define what happens on file reading error
-            reader.onerror = function() {
-                messageElem.textContent = "File reading error";
-                console.error("File Reading Error:", reader.error);
-            };
-
-            // Start reading the file
-            messageElem.textContent = "Reading and analyzing file...";
-            reader.readAsArrayBuffer(files[0]);
-        };
-
-        // Optional: Trigger analysis automatically when a file is selected
-        // fileElem.onchange = () => analyzeButton.click();
-
-    </script>
 
 </body>
 </html>
