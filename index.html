@@ -41,12 +41,14 @@
             grid-template-columns: repeat(1, minmax(0, 1fr)); /* Default to 1 column */
             gap: 1rem; /* gap-4 */
         }
-        /* Switch to 3 columns on medium screens and up */
+        /* Switch to 2 columns on medium screens and up */
         @media (min-width: 768px) { /* md: breakpoint */
             .chunk-grid {
-                grid-template-columns: repeat(3, minmax(0, 1fr)); /* md:grid-cols-3 */
+                /* First column auto width, second takes remaining space */
+                grid-template-columns: auto 1fr; /* md:grid-cols-[auto,1fr] */
             }
-            .chunk-info, .chunk-summary {
+            /* Add border between the two columns */
+            .chunk-info {
                  border-right: 1px solid #e5e7eb; /* md:border-r border-gray-200 */
                  padding-right: 1rem; /* md:pr-4 */
             }
@@ -60,13 +62,13 @@
             text-transform: uppercase;
             letter-spacing: 0.05em;
         }
-        /* Styling for key-value pairs */
-        .chunk-info p, .chunk-summary p {
+        /* Styling for key-value pairs in the details column */
+        .chunk-info p {
             font-size: 0.875rem; /* text-sm */
             margin-bottom: 0.25rem; /* mb-1 */
             color: #374151; /* text-gray-700 */
         }
-         .chunk-info p strong, .chunk-summary p strong {
+         .chunk-info p strong {
              color: #1f2937; /* text-gray-800 */
              min-width: 60px; /* Ensure alignment */
              display: inline-block;
@@ -75,7 +77,7 @@
         .mono {
             font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
         }
-        /* Styling for the text content area */
+        /* Styling for the text content area (<pre>) */
         .text-content-pre {
             white-space: pre-wrap; /* Allow wrapping */
             word-break: break-word; /* Break long words/text */
@@ -85,18 +87,20 @@
             padding: 0.75rem; /* p-3 */
             border-radius: 0.375rem; /* rounded-md */
             border: 1px solid #e5e7eb; /* border border-gray-200 */
-            max-height: 200px; /* Limit height */
-            overflow-y: auto; /* Add scroll if needed */
+            /* REMOVED max-height and overflow-y */
             color: #1f2937; /* text-gray-800 */
         }
+        /* Styling for placeholder text when no data */
         .text-content-placeholder {
             font-style: italic;
             color: #9ca3af; /* text-gray-400 */
             font-size: 0.875rem; /* text-sm */
+            padding: 0.75rem 0; /* Add some padding */
         }
          /* CRC Status styling */
         .crc-ok { color: #16a34a; font-weight: 500; } /* green-600 */
         .crc-error { color: #dc2626; font-weight: 700; } /* red-600 */
+        /* Styling for chunks with CRC errors */
         .chunk-container.error-chunk {
              border-left: 4px solid #ef4444; /* border-l-4 border-red-500 */
              background-color: #fffbeb; /* bg-yellow-50 - subtle highlight */
