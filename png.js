@@ -4,6 +4,8 @@
  * Copyright (c) 2022 Nayuki
  * All rights reserved. Contact Nayuki for licensing.
  * https://www.nayuki.io/page/png-file-chunk-inspector
+ *
+ * Modified to report CRC errors instead of throwing exceptions.
  */
 
 "use strict";
@@ -13,82 +15,180 @@ var app = new function() {
 
 	/*---- Fields ----*/
 
-	let fileElem = document.getElementById("input-file");
-	let analyzeButton = document.getElementById("analyze-button");
-	let messageElem = document.getElementById("message");
-	let chunkTable = document.getElementById("chunk-table");
-	let chunkTableBody = chunkTable.querySelector("tbody");
+	// Get references to DOM elements once the DOM is loaded
+	let fileElem = null;
+	let analyzeButton = null;
+	let messageElem = null;
+	let chunkTable = null;
+	let chunkTableBody = null;
 
-	const CHUNK_TYPES_TO_DUMP = new Set(["gAMA", "sRGB", "pHYs", "iTXt", "tEXt", "zTXt", "tIME"]);
+	// Set of chunk types for which to display a hex/ASCII dump
+	// Added more common types based on PNG spec and common usage
+	const CHUNK_TYPES_TO_DUMP = new Set([
+		"gAMA", "sRGB", "pHYs", "iTXt", "tEXt", "zTXt", "tIME",
+		"cHRM", "iCCP", "sBIT", "cICP", "bKGD", "hIST", "sPLT",
+		"eXIf" // Added eXIf as it often contains interesting metadata
+	]);
 
 
 	/*---- Initialization ----*/
+	// Wait for the DOM to be fully loaded before accessing elements
+	document.addEventListener('DOMContentLoaded', () => {
+		fileElem = document.getElementById("input-file");
+		analyzeButton = document.getElementById("analyze-button");
+		messageElem = document.getElementById("message");
+		chunkTable = document.getElementById("chunk-table");
+		chunkTableBody = chunkTable.querySelector("tbody");
 
-	analyzeButton.onclick = function() {
-		messageElem.textContent = "";
-		while (chunkTableBody.firstChild !== null)
+		// Ensure elements exist before attaching event listener
+		if (analyzeButton) {
+			analyzeButton.onclick = analyzeFile;
+		} else {
+			console.error("Analyze button not found!");
+		}
+        if (fileElem) {
+             // Optional: Trigger analysis automatically when a file is selected
+             // fileElem.onchange = analyzeFile;
+        } else {
+            console.error("File input element not found!");
+        }
+	});
+
+	// Function to handle the analysis process
+	function analyzeFile() {
+		// Ensure elements are available
+		if (!fileElem || !messageElem || !chunkTableBody || !chunkTable) {
+			console.error("DOM elements not ready or not found.");
+			if (messageElem) messageElem.textContent = "Initialization error. Please refresh.";
+			return;
+		}
+
+		messageElem.textContent = ""; // Clear previous messages
+		// Clear previous table content safely
+		while (chunkTableBody.firstChild) {
 			chunkTableBody.removeChild(chunkTableBody.firstChild);
-		chunkTable.classList.add("hidden");
+		}
+		chunkTable.classList.add("hidden"); // Hide table until results are ready
 
 		let files = fileElem.files;
-		if (files.length < 1) {
+		if (!files || files.length < 1) {
 			messageElem.textContent = "No file selected";
 			return;
 		}
 
 		let reader = new FileReader();
+
+		// Define what happens when the file is successfully read
 		reader.onload = function() {
 			try {
 				let bytes = new Uint8Array(reader.result);
-				let chunks = readPngChunks(bytes);
-				renderChunks(chunks, bytes);
+				let parseResult = readPngChunks(bytes); // Get chunks and potential warnings
+				renderChunks(parseResult.chunks, parseResult.warnings); // Pass warnings to renderer
+				if (parseResult.warnings.length > 0) {
+					messageElem.textContent = "File parsed with warnings (see console and table).";
+					messageElem.classList.remove('text-red-600'); // Use default text color or a warning color
+					messageElem.classList.add('text-yellow-600');
+				} else {
+					messageElem.textContent = "File parsed successfully.";
+					messageElem.classList.remove('text-red-600', 'text-yellow-600'); // Clear color classes
+                    messageElem.classList.add('text-green-600'); // Use green for success
+				}
 			} catch (e) {
-				messageElem.textContent = e.toString();
+				// Handle critical parsing errors (e.g., not a PNG, missing essential chunks)
+				messageElem.textContent = `Error: ${e.message || e.toString()}`;
+                messageElem.classList.add('text-red-600'); // Ensure error color
+                messageElem.classList.remove('text-yellow-600', 'text-green-600');
+				console.error("PNG Parsing Error:", e);
 			}
 		};
+
+		// Define what happens on file reading error
 		reader.onerror = function() {
 			messageElem.textContent = "File reading error";
+            messageElem.classList.add('text-red-600');
+            messageElem.classList.remove('text-yellow-600', 'text-green-600');
+			console.error("File Reading Error:", reader.error);
 		};
+
+		// Start reading the file
 		messageElem.textContent = "Reading file...";
+        messageElem.classList.remove('text-red-600', 'text-yellow-600', 'text-green-600'); // Neutral color while reading
 		reader.readAsArrayBuffer(files[0]);
 	};
 
 
 	/*---- PNG parsing functions ----*/
 
-	// Takes the raw bytes of a PNG file, returns a list of chunk objects, throwing an exception if error.
+	// Takes the raw bytes of a PNG file, returns an object { chunks: [], warnings: [] },
+	// throwing an exception only for critical errors.
 	function readPngChunks(bytes) {
 		// Check file signature
 		if (bytes.length < 8 || !bytes.subarray(0, 8).every((b, i) => (b === PNG_SIGNATURE[i])))
-			throw "Not a PNG file";
+			throw new Error("Not a PNG file (invalid signature)"); // Use Error object
 
 		// Parse chunks
 		let chunks = [];
+		let warnings = []; // Store warnings like CRC errors
 		let index = 8;
+		let foundIhdr = false;
+		let foundIdat = false;
+		let foundIend = false;
+
 		while (index < bytes.length) {
+			// Check for sufficient bytes for chunk header
+			if (index + 8 > bytes.length) {
+				warnings.push(`Offset ${index}: Unexpected end of file (chunk header truncated)`);
+				break; // Stop processing if header is incomplete
+			}
+
 			// Parse chunk header
-			if (index + 8 > bytes.length)
-				throw "Unexpected end of file (chunk header)";
 			let length = readUint32(bytes, index + 0);
-			if (length >= 0x80000000)
-				throw "Chunk length too large";
+			if (length >= 0x80000000) {
+                // This is technically allowed but practically problematic for memory. Warn instead of error.
+				warnings.push(`Offset ${index}: Chunk length ${length} is unusually large.`);
+                // Consider adding a check here to prevent allocating excessive memory if needed.
+            }
 			let type = readAscii(bytes, index + 4, 4);
-			if (!/^[A-Za-z]{4}$/.test(type))
-				throw "Chunk type has invalid characters";
+			if (!/^[A-Za-z]{4}$/.test(type)) {
+                // Invalid chunk type is serious, but maybe recoverable? Let's warn and try to skip.
+                warnings.push(`Offset ${index}: Chunk type "${type}" has invalid characters. Skipping chunk.`);
+                // We don't know the length for sure if the type is corrupt, but the length field might be valid.
+                // Let's try to skip based on the read length, but be cautious.
+                if (index + 8 + length + 4 <= bytes.length) {
+                     index += 8 + length + 4;
+                     continue; // Try next chunk
+                } else {
+                    warnings.push(`Offset ${index}: Cannot safely skip corrupt chunk due to potential length issue. Stopping parse.`);
+                    break;
+                }
+            }
+
+
+			// Check for sufficient bytes for chunk data and CRC
+			if (index + 8 + length + 4 > bytes.length) {
+				warnings.push(`Offset ${index}: Unexpected end of file (chunk data or CRC truncated for ${type})`);
+				break; // Stop processing if chunk data/CRC is incomplete
+			}
 
 			// Parse chunk data
-			if (index + 8 + length + 4 > bytes.length)
-				throw "Unexpected end of file (chunk data)";
 			let data = bytes.subarray(index + 8, index + 8 + length);
 
-			// Parse chunk CRC
+			// Parse and verify chunk CRC
 			let actualCrc = readUint32(bytes, index + 8 + length);
 			let typeBytes = new Uint8Array(4);
 			for (let i = 0; i < 4; i++)
 				typeBytes[i] = type.charCodeAt(i);
 			let expectedCrc = computeCrc(typeBytes, data);
-			if (actualCrc !== expectedCrc)
-				throw "Chunk CRC mismatch";
+			let crcOk = (actualCrc === expectedCrc);
+
+            // *** MODIFICATION START: Report CRC mismatch instead of throwing error ***
+			if (!crcOk) {
+				let warningMsg = `Chunk ${type} (offset ${index}): CRC mismatch! Expected ${formatHex(expectedCrc, 8)}, Got ${formatHex(actualCrc, 8)}`;
+				warnings.push(warningMsg);
+				console.warn(warningMsg);
+                // Do not throw error, continue processing
+			}
+            // *** MODIFICATION END ***
 
 			// Append chunk object
 			chunks.push({
@@ -96,23 +196,40 @@ var app = new function() {
 				length : length,
 				data : data,
 				offset : index,
+                crc : actualCrc, // Store the actual CRC read from file
+                crcOk: crcOk // Store the validation result
 			});
-			index += 8 + length + 4;
 
-			// Check for last chunk
-			if (type === "IEND" && index !== bytes.length)
-				console.log("Warning: File continues after IEND chunk");
+            // Track essential chunks
+            if (type === "IHDR") {
+                if (chunks.length > 1) {
+                    warnings.push("IHDR chunk is not the first chunk.");
+                }
+                foundIhdr = true;
+            }
+            if (type === "IDAT") foundIdat = true;
+            if (type === "IEND") {
+                foundIend = true;
+                if (index + 8 + length + 4 < bytes.length) {
+				    warnings.push("Data found after IEND chunk.");
+                }
+                // Optional: break here if you strictly want to ignore data after IEND
+                // break;
+            }
+
+			index += 8 + length + 4; // Move index to the next chunk
 		}
 
-		// Check critical chunks
-		if (chunks.length === 0 || chunks[0].type !== "IHDR")
-			throw "Missing IHDR chunk";
-		if (chunks[chunks.length - 1].type !== "IEND")
-			throw "Missing IEND chunk";
-		let hasIdat = chunks.some(ch => (ch.type === "IDAT"));
-		if (!hasIdat)
-			throw "Missing IDAT chunk";
-		return chunks;
+		// Check critical chunk presence after parsing all possible chunks
+		if (!foundIhdr)
+			throw new Error("Missing IHDR chunk"); // This is critical
+		if (!foundIdat)
+            warnings.push("Missing IDAT chunk (no image data)"); // Warn, maybe it's intentional?
+        if (!foundIend && index >= bytes.length)
+            warnings.push("Missing IEND chunk (file might be truncated)");
+
+
+		return { chunks: chunks, warnings: warnings };
 	}
 
 
@@ -132,7 +249,7 @@ var app = new function() {
 
 	// Updates the CRC-32 with the given sequence of bytes.
 	function updateCrc(crc, bytes) {
-		// Initialize table
+		// Initialize table only once
 		if (crcTable === null) {
 			crcTable = new Int32Array(256);
 			for (let i = 0; i < 256; i++) {
@@ -141,7 +258,7 @@ var app = new function() {
 					if ((c & 1) === 0)
 						c = c >>> 1;
 					else
-						c = (c >>> 1) ^ 0xEDB88320;
+						c = (c >>> 1) ^ 0xEDB88320; // Standard CRC-32 polynomial
 				}
 				crcTable[i] = c;
 			}
@@ -155,54 +272,88 @@ var app = new function() {
 
 	/*---- Rendering functions ----*/
 
-	// Renders the given list of chunk objects into the page DOM. Also requires the raw file bytes.
-	function renderChunks(chunks, bytes) {
-		messageElem.textContent = "File parsed successfully";
+	// Renders the given list of chunk objects into the page DOM.
+	function renderChunks(chunks, warnings) {
 		chunkTable.classList.remove("hidden");
 
+		// Log all warnings collected during parsing
+		warnings.forEach(warning => console.warn("Parsing Warning:", warning));
+
+		// Get table header info for mapping data keys to cells
 		let headers = chunkTable.querySelector("thead tr").cells;
 		let colInfos = [];
-		for (let i = 0; i < headers.length; i++)
-			colInfos.push({name: headers[i].dataset.key, isRight: headers[i].classList.contains("text-right")});
+		for (let i = 0; i < headers.length; i++) {
+			colInfos.push({
+				name: headers[i].dataset.key, // Get the key from data-key attribute
+				isRight: headers[i].classList.contains("text-right")
+			});
+		}
 
+		// Iterate through each chunk and create a table row
 		for (const chunk of chunks) {
 			let row = chunkTableBody.insertRow();
+            if (!chunk.crcOk) {
+                row.style.backgroundColor = "#fffbeb"; // Light yellow background for rows with CRC errors
+            }
 
+			// Create cells based on header info
 			let cells = {};
 			for (const info of colInfos) {
 				let cell = row.insertCell();
-				cell.classList.add("p-2", "border", "border-gray-300");
-				if (info.isRight)
+				// Basic Tailwind-like styling (applied via <style> in HTML)
+				if (info.isRight) {
 					cell.classList.add("text-right");
-				cells[info.name] = cell;
+				}
+				cells[info.name] = cell; // Store cell reference by key
 			}
 
+			// Populate cells with chunk data
 			cells.offset.textContent = formatNumber(chunk.offset);
 			cells.length.textContent = formatNumber(chunk.length);
 			cells.type.textContent = chunk.type;
-			cells.crc.textContent = formatHex(readUint32(bytes, chunk.offset + 8 + chunk.length), 8);
+			cells.crc.textContent = formatHex(chunk.crc, 8); // Show the CRC read from the file
 
+			// Get chunk summary
 			let summary = "";
 			try {
-				summary = summarizeChunk(chunk);
+				summary = summarizeChunk(chunk); // Summarize based on chunk type
 			} catch (e) {
-				summary = e.toString();
+				console.error(`Error summarizing chunk ${chunk.type} at offset ${chunk.offset}:`, e);
+				summary = `Error summarizing: ${e.message || e.toString()}`;
 			}
+
+            // *** MODIFICATION START: Add CRC status to summary ***
+            if (!chunk.crcOk) {
+                summary += (summary ? "; " : "") + "CRC ERROR!"; // Append CRC error notice
+                cells.crc.style.color = "red"; // Highlight the incorrect CRC value
+                cells.crc.style.fontWeight = "bold";
+            }
+            // *** MODIFICATION END ***
 			cells.summary.textContent = summary;
 
-			if (CHUNK_TYPES_TO_DUMP.has(chunk.type))
-				cells.dump.textContent = dumpChunkData(chunk.data);
+
+			// Display data dump if the chunk type is in the set
+			if (CHUNK_TYPES_TO_DUMP.has(chunk.type)) {
+				const dumpContent = dumpChunkData(chunk.data);
+				// Use <pre> for better formatting of the dump
+				const pre = document.createElement('pre');
+				pre.textContent = dumpContent;
+				cells.dump.appendChild(pre);
+			} else {
+				 cells.dump.textContent = '—'; // Indicate no dump for this type
+			}
 		}
 	}
 
 
+	// Summarizes the data content of a chunk based on its type.
+	// Throws an error string if the format is invalid.
 	function summarizeChunk(chunk) {
 		let data = chunk.data;
 		let length = chunk.length;
 		switch (chunk.type) {
 			case "IHDR": {
-				if (length !== 13)
-					throw "Invalid length";
+				if (length !== 13) throw "Invalid IHDR length";
 				let width = readUint32(data, 0);
 				let height = readUint32(data, 4);
 				let bitDepth = data[8];
@@ -210,47 +361,40 @@ var app = new function() {
 				let compressionMethod = data[10];
 				let filterMethod = data[11];
 				let interlaceMethod = data[12];
-				if (width === 0 || height === 0)
-					throw "Zero width or height";
-				if (!isValidBitDepthColorType(bitDepth, colorType))
-					throw "Invalid bit depth and color type combination";
-				if (compressionMethod !== 0)
-					throw "Invalid compression method";
-				if (filterMethod !== 0)
-					throw "Invalid filter method";
-				if (interlaceMethod !== 0 && interlaceMethod !== 1)
-					throw "Invalid interlace method";
+				if (width === 0 || height === 0) throw "Zero width or height";
+				if (!isValidBitDepthColorType(bitDepth, colorType)) throw "Invalid bit depth/color type combination";
+				if (compressionMethod !== 0) throw "Invalid compression method";
+				if (filterMethod !== 0) throw "Invalid filter method";
+				if (interlaceMethod !== 0 && interlaceMethod !== 1) throw "Invalid interlace method";
 				let colorTypeStr;
 				switch (colorType) {
 					case 0: colorTypeStr = "Grayscale"; break;
 					case 2: colorTypeStr = "Truecolor"; break;
 					case 3: colorTypeStr = "Indexed-color"; break;
-					case 4: colorTypeStr = "Grayscale with alpha"; break;
-					case 6: colorTypeStr = "Truecolor with alpha"; break;
-					default: throw "Invalid color type";
+					case 4: colorTypeStr = "Grayscale+alpha"; break;
+					case 6: colorTypeStr = "Truecolor+alpha"; break;
+					default: colorTypeStr = "Invalid"; // Should be caught by isValidBitDepthColorType
 				}
-				return `Width=${width}, Height=${height}, Bit depth=${bitDepth}, Color type=${colorType} (${colorTypeStr}), Compression=${compressionMethod}, Filter=${filterMethod}, Interlace=${interlaceMethod}`;
+				return `W=${width}, H=${height}, Depth=${bitDepth}, Type=${colorType} (${colorTypeStr}), Comp=${compressionMethod}, Filter=${filterMethod}, Lace=${interlaceMethod}`;
 			}
 			case "PLTE": {
-				if (length % 3 !== 0)
-					throw "Invalid length";
+				if (length % 3 !== 0 || length > 256*3 || length === 0) throw "Invalid PLTE length";
 				return `Palette entries=${length / 3}`;
 			}
 			case "IDAT": {
-				return "";
+				return "Image data"; // Simple summary
 			}
 			case "IEND": {
-				if (length !== 0)
-					throw "Invalid length";
-				return "";
+				if (length !== 0) throw "Invalid IEND length";
+				return "End of image";
 			}
 			case "tRNS": {
-				// Note: This depends on IHDR having been seen
-				return "";
+				// Validity depends on IHDR color type, but basic length check possible
+                // Needs context from IHDR chunk to fully validate. For now, just report length.
+				return `Transparency data (${length} bytes)`;
 			}
 			case "cHRM": {
-				if (length !== 32)
-					throw "Invalid length";
+				if (length !== 32) throw "Invalid cHRM length";
 				let whiteX = readUint32(data, 0) / 100000;
 				let whiteY = readUint32(data, 4) / 100000;
 				let redX = readUint32(data, 8) / 100000;
@@ -259,34 +403,29 @@ var app = new function() {
 				let greenY = readUint32(data, 20) / 100000;
 				let blueX = readUint32(data, 24) / 100000;
 				let blueY = readUint32(data, 28) / 100000;
-				return `White point x=${whiteX}, White point y=${whiteY}, Red x=${redX}, Red y=${redY}, Green x=${greenX}, Green y=${greenY}, Blue x=${blueX}, Blue y=${blueY}`;
+				// Format numbers to reasonable precision
+				return `White(${whiteX.toFixed(5)},${whiteY.toFixed(5)}), R(${redX.toFixed(5)},${redY.toFixed(5)}), G(${greenX.toFixed(5)},${greenY.toFixed(5)}), B(${blueX.toFixed(5)},${blueY.toFixed(5)})`;
 			}
 			case "gAMA": {
-				if (length !== 4)
-					throw "Invalid length";
+				if (length !== 4) throw "Invalid gAMA length";
 				let gamma = readUint32(data, 0) / 100000;
-				return `Gamma=${gamma}`;
+				return `Gamma=${gamma.toFixed(5)}`;
 			}
 			case "iCCP": {
 				let nul = data.indexOf(0);
-				if (nul === -1)
-					throw "Invalid data format";
+				if (nul === -1 || nul > 79 || nul === 0) throw "Invalid profile name";
 				let name = readLatin1(data, 0, nul);
-				if (!/^[ -~]{1,79}$/.test(name))
-					throw "Invalid profile name";
+				if (nul + 2 > length) throw "Missing compression method"; // Need at least 1 byte for name, null, 1 byte method
 				let compMethod = data[nul + 1];
-				if (compMethod !== 0)
-					throw "Invalid compression method";
-				// let compressedProfile = data.subarray(nul + 2);
-				return `Profile name=${name}, Compression method=${compMethod}`;
+				if (compMethod !== 0) throw "Invalid compression method (only 0 allowed)";
+				return `Profile name="${name}", Comp method=${compMethod}`;
 			}
 			case "sBIT": {
-				// Note: This depends on IHDR having been seen
-				return "";
+				// Validity depends on IHDR color type. Just report length.
+				return `Significant bits (${length} bytes)`;
 			}
 			case "sRGB": {
-				if (length !== 1)
-					throw "Invalid length";
+				if (length !== 1) throw "Invalid sRGB length";
 				let renderingIntent = data[0];
 				let intentStr;
 				switch (renderingIntent) {
@@ -298,136 +437,110 @@ var app = new function() {
 				}
 				return `Rendering intent=${renderingIntent} (${intentStr})`;
 			}
-			case "cICP": {
-				if (length !== 4)
-					throw "Invalid length";
+			case "cICP": { // Introduced in PNG 3rd Edition
+				if (length !== 4) throw "Invalid cICP length";
 				let colorPrimaries = data[0];
 				let transferCharacteristics = data[1];
 				let matrixCoefficients = data[2];
 				let videoFullRangeFlag = data[3];
-				if (videoFullRangeFlag > 1)
-					throw "Invalid video full range flag";
-				return `Color primaries=${colorPrimaries}, Transfer characteristics=${transferCharacteristics}, Matrix coefficients=${matrixCoefficients}, Video full range flag=${videoFullRangeFlag}`;
+				if (videoFullRangeFlag > 1) throw "Invalid video full range flag";
+				return `Primaries=${colorPrimaries}, Transfer=${transferCharacteristics}, Matrix=${matrixCoefficients}, Full range=${videoFullRangeFlag}`;
 			}
 			case "iTXt": {
-				let nul0 = data.indexOf(0);
-				if (nul0 === -1)
-					throw "Invalid data format";
+				let nul0 = data.indexOf(0); // End of keyword
+				if (nul0 === -1 || nul0 > 79 || nul0 === 0) throw "Invalid keyword";
 				let keyword = readLatin1(data, 0, nul0);
-				if (!/^[ -~]{1,79}$/.test(keyword))
-					throw "Invalid keyword";
-				if (nul0 + 2 >= length)
-					throw "Invalid data format";
+				if (nul0 + 3 > length) throw "Data too short (missing flags/tags)"; // Need keyword, null, comp flag, comp method, null for lang tag
 				let compFlag = data[nul0 + 1];
 				let compMethod = data[nul0 + 2];
-				if (compFlag !== 0 && compFlag !== 1)
-					throw "Invalid compression flag";
-				if (compFlag === 1 && compMethod !== 0)
-					throw "Invalid compression method";
-				let nul1 = data.indexOf(0, nul0 + 3);
-				if (nul1 === -1)
-					throw "Invalid data format";
+				if (compFlag !== 0 && compFlag !== 1) throw "Invalid compression flag";
+				if (compFlag === 1 && compMethod !== 0) throw "Invalid compression method for compressed text";
+				let nul1 = data.indexOf(0, nul0 + 3); // End of language tag
+				if (nul1 === -1) throw "Missing language tag terminator";
 				let langTag = readLatin1(data, nul0 + 3, nul1 - (nul0 + 3));
-				let nul2 = data.indexOf(0, nul1 + 1);
-				if (nul2 === -1)
-					throw "Invalid data format";
+				let nul2 = data.indexOf(0, nul1 + 1); // End of translated keyword
+				if (nul2 === -1) throw "Missing translated keyword terminator";
 				let translatedKeyword = readUtf8(data, nul1 + 1, nul2 - (nul1 + 1));
-				// let text = data.subarray(nul2 + 1);
-				return `Keyword=${keyword}, Compression flag=${compFlag}, Compression method=${compMethod}, Language tag=${JSON.stringify(langTag)}, Translated keyword=${JSON.stringify(translatedKeyword)}`;
+				// let text = readUtf8(data.subarray(nul2 + 1)); // Actual text requires decompression if compFlag=1
+				return `Keyword="${keyword}", Comp=${compFlag}, Method=${compMethod}, Lang="${langTag}", Trans Key="${translatedKeyword}"`;
 			}
 			case "tEXt": {
 				let nul = data.indexOf(0);
-				if (nul === -1)
-					throw "Invalid data format";
+				if (nul === -1 || nul > 79 || nul === 0) throw "Invalid keyword";
 				let keyword = readLatin1(data, 0, nul);
-				if (!/^[ -~]{1,79}$/.test(keyword))
-					throw "Invalid keyword";
-				// let text = readLatin1(data, nul + 1, length - (nul + 1));
-				return `Keyword=${keyword}`;
+				let text = readLatin1(data, nul + 1, length - (nul + 1));
+				// Limit displayed text length for brevity
+                let textPreview = text.length > 60 ? text.substring(0, 57) + "..." : text;
+				return `Keyword="${keyword}", Text="${textPreview}"`;
 			}
 			case "zTXt": {
 				let nul = data.indexOf(0);
-				if (nul === -1)
-					throw "Invalid data format";
+				if (nul === -1 || nul > 79 || nul === 0) throw "Invalid keyword";
 				let keyword = readLatin1(data, 0, nul);
-				if (!/^[ -~]{1,79}$/.test(keyword))
-					throw "Invalid keyword";
-				if (nul + 1 >= length)
-					throw "Invalid data format";
+				if (nul + 2 > length) throw "Data too short (missing compression method)";
 				let compMethod = data[nul + 1];
-				if (compMethod !== 0)
-					throw "Invalid compression method";
-				// let compressedText = data.subarray(nul + 2);
-				return `Keyword=${keyword}, Compression method=${compMethod}`;
+				if (compMethod !== 0) throw "Invalid compression method (only 0 allowed)";
+				// let compressedText = data.subarray(nul + 2); // Requires decompression
+				return `Keyword="${keyword}", Comp method=${compMethod}`;
 			}
 			case "bKGD": {
-				// Note: This depends on IHDR and PLTE having been seen
-				return "";
+				// Validity depends on IHDR color type. Just report length.
+				return `Background color (${length} bytes)`;
 			}
 			case "hIST": {
-				// Note: This depends on PLTE having been seen
-				if (length % 2 !== 0)
-					throw "Invalid length";
+				// Validity depends on PLTE having been seen.
+				if (length % 2 !== 0 || length === 0) throw "Invalid hIST length";
 				return `Histogram entries=${length / 2}`;
 			}
 			case "pHYs": {
-				if (length !== 9)
-					throw "Invalid length";
+				if (length !== 9) throw "Invalid pHYs length";
 				let ppuX = readUint32(data, 0);
 				let ppuY = readUint32(data, 4);
 				let unitSpec = data[8];
 				let unitStr;
-				if (unitSpec === 0)
-					unitStr = "Unknown";
-				else if (unitSpec === 1)
-					unitStr = "Metre";
-				else
-					throw "Invalid unit specifier";
-				return `Pixels per unit X=${ppuX}, Pixels per unit Y=${ppuY}, Unit specifier=${unitSpec} (${unitStr})`;
+				if (unitSpec === 0) unitStr = "Unknown";
+				else if (unitSpec === 1) unitStr = "Metre";
+				else throw "Invalid unit specifier";
+				return `PPU X=${ppuX}, PPU Y=${ppuY}, Unit=${unitSpec} (${unitStr})`;
 			}
 			case "sPLT": {
 				let nul = data.indexOf(0);
-				if (nul === -1)
-					throw "Invalid data format";
+				if (nul === -1 || nul > 79 || nul === 0) throw "Invalid palette name";
 				let name = readLatin1(data, 0, nul);
-				if (!/^[ -~]{1,79}$/.test(name))
-					throw "Invalid palette name";
-				if (nul + 1 >= length)
-					throw "Invalid data format";
+				if (nul + 2 > length) throw "Data too short (missing sample depth)";
 				let sampleDepth = data[nul + 1];
-				if (sampleDepth !== 8 && sampleDepth !== 16)
-					throw "Invalid sample depth";
-				let numEntries = (length - (nul + 1 + 1)) / (sampleDepth / 8 * 4 + 2);
-				if (Math.floor(numEntries) !== numEntries)
-					throw "Invalid data length";
-				return `Palette name=${name}, Sample depth=${sampleDepth}, Entries=${numEntries}`;
+				if (sampleDepth !== 8 && sampleDepth !== 16) throw "Invalid sample depth";
+				let entrySize = (sampleDepth === 8 ? 6 : 10); // R,G,B,A (1 or 2 bytes each) + Freq (2 bytes)
+                let dataLength = length - (nul + 1 + 1);
+				if (dataLength % entrySize !== 0) throw `Invalid data length for ${sampleDepth}-bit entries`;
+				let numEntries = dataLength / entrySize;
+				return `Palette name="${name}", Depth=${sampleDepth}, Entries=${numEntries}`;
 			}
-			case "eXIf": {
-				return "";
+			case "eXIf": { // From Exif standard, not PNG spec directly
+				return `Exif data (${length} bytes)`;
 			}
 			case "tIME": {
-				if (length !== 7)
-					throw "Invalid length";
+				if (length !== 7) throw "Invalid tIME length";
 				let year = readUint16(data, 0);
 				let month = data[2];
 				let day = data[3];
 				let hour = data[4];
 				let minute = data[5];
 				let second = data[6];
-				if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 60)
+				if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 60) // second can be 60 for leap second
 					throw "Invalid date/time value";
-				return `Year=${year}, Month=${month}, Day=${day}, Hour=${hour}, Minute=${minute}, Second=${second}`;
+				// Format nicely with padding
+				return `Last modified: ${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')} ${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}:${String(second).padStart(2,'0')}`;
 			}
-			case "acTL": {
-				if (length !== 8)
-					throw "Invalid length";
+			// APNG Chunks
+			case "acTL": { // Animation Control
+				if (length !== 8) throw "Invalid acTL length";
 				let numFrames = readUint32(data, 0);
 				let numPlays = readUint32(data, 4);
-				return `Number of frames=${numFrames}, Number of plays=${numPlays}`;
+				return `Frames=${numFrames}, Plays=${numPlays === 0 ? 'Infinite' : numPlays}`;
 			}
-			case "fcTL": {
-				if (length !== 26)
-					throw "Invalid length";
+			case "fcTL": { // Frame Control
+				if (length !== 26) throw "Invalid fcTL length";
 				let sequenceNumber = readUint32(data, 0);
 				let width = readUint32(data, 4);
 				let height = readUint32(data, 8);
@@ -437,94 +550,129 @@ var app = new function() {
 				let delayDen = readUint16(data, 22);
 				let disposeOp = data[24];
 				let blendOp = data[25];
-				if (width === 0 || height === 0)
-					throw "Zero width or height";
-				if (disposeOp > 2)
-					throw "Invalid dispose operation";
-				if (blendOp > 1)
-					throw "Invalid blend operation";
-				return `Sequence number=${sequenceNumber}, Width=${width}, Height=${height}, X offset=${xOffset}, Y offset=${yOffset}, Delay numerator=${delayNum}, Delay denominator=${delayDen}, Dispose operation=${disposeOp}, Blend operation=${blendOp}`;
+				if (width === 0 || height === 0) throw "Zero frame width or height";
+                if (delayDen === 0) delayDen = 100; // Default denominator is 100 if 0
+				if (disposeOp > 2) throw "Invalid dispose operation";
+				if (blendOp > 1) throw "Invalid blend operation";
+                let delay = delayDen === 0 ? "N/A" : (delayNum / delayDen).toFixed(4) + "s";
+				return `Seq=${sequenceNumber}, Dim=${width}x${height}, Off=(${xOffset},${yOffset}), Delay=${delay}, Disp=${disposeOp}, Blend=${blendOp}`;
 			}
-			case "fdAT": {
-				if (length < 4)
-					throw "Invalid length";
+			case "fdAT": { // Frame Data
+				if (length < 4) throw "Invalid fdAT length";
 				let sequenceNumber = readUint32(data, 0);
-				return `Sequence number=${sequenceNumber}`;
+				return `Frame data seq=${sequenceNumber}`;
 			}
+			// Unknown Chunks
 			default: {
-				if (/^[a-z]/.test(chunk.type))
-					return "Ancillary chunk";
+				if (/^[a-z]/.test(chunk.type.charAt(0))) // First char determines critical/ancillary
+					return "Ancillary chunk (Unknown)";
 				else
-					return "Critical chunk";
+					return "Critical chunk (Unknown)";
 			}
 		}
 	}
 
 
+	// Checks if the bit depth and color type combination is valid according to PNG spec.
 	function isValidBitDepthColorType(bitDepth, colorType) {
-		if (colorType === 0) return [1, 2, 4, 8, 16].includes(bitDepth);
-		if (colorType === 2) return [8, 16].includes(bitDepth);
-		if (colorType === 3) return [1, 2, 4, 8].includes(bitDepth);
-		if (colorType === 4) return [8, 16].includes(bitDepth);
-		if (colorType === 6) return [8, 16].includes(bitDepth);
-		return false;
+		const validCombinations = {
+			0: [1, 2, 4, 8, 16], // Grayscale
+			2: [8, 16],         // Truecolor
+			3: [1, 2, 4, 8],    // Indexed-color
+			4: [8, 16],         // Grayscale with alpha
+			6: [8, 16]          // Truecolor with alpha
+		};
+		return validCombinations[colorType]?.includes(bitDepth) ?? false;
 	}
 
 
+	// Dumps chunk data as hex and printable ASCII.
 	function dumpChunkData(data) {
 		const BYTES_PER_LINE = 16;
 		let s = "";
 		for (let i = 0; i < data.length; i += BYTES_PER_LINE) {
 			let slice = data.subarray(i, Math.min(i + BYTES_PER_LINE, data.length));
-			for (let j = 0; j < slice.length; j++)
-				s += formatHex(slice[j], 2) + " ";
-			if (slice.length < BYTES_PER_LINE)
-				s += " ".repeat((BYTES_PER_LINE - slice.length) * 3);
+			// Hex part
+			for (let j = 0; j < BYTES_PER_LINE; j++) {
+                if (j < slice.length)
+				    s += formatHex(slice[j], 2) + " ";
+                else
+                    s += "   "; // Pad if line is short
+                if (j === 7) s += " "; // Extra space in the middle
+			}
 			s += " |";
+			// ASCII part
 			for (let j = 0; j < slice.length; j++) {
 				let c = slice[j];
-				if (0x20 <= c && c <= 0x7E)
+				if (0x20 <= c && c <= 0x7E) // Printable ASCII range
 					s += String.fromCharCode(c);
 				else
-					s += ".";
+					s += "."; // Placeholder for non-printable
 			}
-			s += "|\n";
+            s += "|\n"; // Add closing pipe and newline
 		}
-		return s.replace(/\n$/, "");
+		return s.replace(/\n$/, ""); // Remove trailing newline
 	}
 
 
 	/*---- Utilities ----*/
 
+	// Reads a 16-bit unsigned integer (big-endian) from byte array.
 	function readUint16(bytes, offset) {
+        if (offset + 2 > bytes.length) throw "Read past end of buffer (Uint16)";
 		return (bytes[offset] << 8) | bytes[offset + 1];
 	}
 
+	// Reads a 32-bit unsigned integer (big-endian) from byte array.
 	function readUint32(bytes, offset) {
+        if (offset + 4 > bytes.length) throw "Read past end of buffer (Uint32)";
+		// Use bit shifts and unsigned right shift (>>> 0) for correct positive result
 		return ((bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3]) >>> 0;
 	}
 
+	// Reads ASCII string (1 byte per char) from byte array.
 	function readAscii(bytes, offset, len) {
+        if (offset + len > bytes.length) throw `Read past end of buffer (ASCII: len=${len})`;
 		let result = "";
-		for (let i = 0; i < len; i++)
-			result += String.fromCharCode(bytes[offset + i]);
+		for (let i = 0; i < len; i++) {
+            let charCode = bytes[offset + i];
+            // Basic ASCII validation (optional but good practice)
+            // if (charCode > 127) console.warn(`Non-ASCII char code ${charCode} found in ASCII string`);
+			result += String.fromCharCode(charCode);
+        }
 		return result;
 	}
 
+	// Reads Latin-1 string (1 byte per char) from byte array.
 	function readLatin1(bytes, offset, len) {
+        // For JavaScript, Latin-1 (ISO-8859-1) reading is often the same as ASCII
+        // if character codes are treated directly.
 		return readAscii(bytes, offset, len);
 	}
 
+	// Reads UTF-8 string from byte array. Throws error on invalid UTF-8 sequence.
 	function readUtf8(bytes, offset, len) {
-		return new TextDecoder("utf-8", {fatal: true}).decode(bytes.subarray(offset, offset + len));
+        if (offset + len > bytes.length) throw `Read past end of buffer (UTF8: len=${len})`;
+        let subarray = bytes.subarray(offset, offset + len);
+		try {
+            // Use TextDecoder for robust UTF-8 decoding
+		    return new TextDecoder("utf-8", { fatal: true }).decode(subarray);
+        } catch (e) {
+            // Provide more context on error
+            throw `Invalid UTF-8 sequence found (offset ${offset}, length ${len}): ${e.message}`;
+        }
 	}
 
+	// Formats a number with thousands separators.
 	function formatNumber(n) {
-		return n.toString().replace(/(\d)(?=(\d{3})+(?!\d))/g, "$1,");
+        if (typeof n !== 'number') return String(n);
+		return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 	}
 
+	// Formats a number as uppercase hexadecimal string, padded with zeros.
 	function formatHex(n, digits) {
+        if (typeof n !== 'number') return String(n);
 		return n.toString(16).toUpperCase().padStart(digits, "0");
 	}
 
-};
+}; // End of app scope
