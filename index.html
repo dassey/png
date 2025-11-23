@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PNG Chunk Inspector</title>
+    <title>PNG Metadata Auditor</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
@@ -11,128 +11,93 @@
                 extend: {
                     fontFamily: {
                         sans: ['Inter', 'sans-serif'],
-                        mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', "Liberation Mono", "Courier New", 'monospace'],
+                        mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
                     },
+                    colors: {
+                        slate: {
+                            850: '#1e293b',
+                            900: '#0f172a',
+                        }
+                    }
                 }
             }
         }
     </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
-        /* Basic body styling */
-        body {
-            font-family: 'Inter', sans-serif;
-        }
-        /* Container for each chunk's details */
-        .chunk-container {
-            background-color: #ffffff; /* bg-white */
-            border: 1px solid #d1d5db; /* border border-gray-300 */
-            border-radius: 0.5rem; /* rounded-lg */
-            margin-bottom: 1rem; /* mb-4 */
-            padding: 1rem; /* p-4 */
-            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06); /* shadow-md */
-            overflow: hidden; /* Prevent content spill */
-        }
-        /* Grid layout within each chunk container */
-        .chunk-grid {
-            display: grid;
-            grid-template-columns: repeat(1, minmax(0, 1fr)); /* Default to 1 column */
-            gap: 1rem; /* gap-4 */
-        }
-        /* Switch to 2 columns on medium screens and up */
-        @media (min-width: 768px) { /* md: breakpoint */
-            .chunk-grid {
-                /* First column auto width, second takes remaining space */
-                grid-template-columns: auto 1fr; /* md:grid-cols-[auto,1fr] */
-            }
-            /* Add border between the two columns */
-            .chunk-info {
-                 border-right: 1px solid #e5e7eb; /* md:border-r border-gray-200 */
-                 padding-right: 1rem; /* md:pr-4 */
-            }
-        }
-        /* Styling for column titles */
-        .chunk-title {
-            font-weight: 600; /* font-semibold */
-            margin-bottom: 0.5rem; /* mb-2 */
-            color: #4b5563; /* text-gray-600 */
-            font-size: 0.875rem; /* text-sm */
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-        /* Styling for key-value pairs in the details column */
-        .chunk-info p {
-            font-size: 0.875rem; /* text-sm */
-            margin-bottom: 0.25rem; /* mb-1 */
-            color: #374151; /* text-gray-700 */
-        }
-         .chunk-info p strong {
-             color: #1f2937; /* text-gray-800 */
-             min-width: 60px; /* Ensure alignment */
-             display: inline-block;
-         }
-        /* Monospace font for technical details */
-        .mono {
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-        }
-        /* Styling for the text content area (<pre>) */
-        .text-content-pre {
-            white-space: pre-wrap; /* Allow wrapping */
-            word-break: break-word; /* Break long words/text */
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-            font-size: 0.875rem; /* text-sm */
-            background-color: #f9fafb; /* bg-gray-50 */
-            padding: 0.75rem; /* p-3 */
-            border-radius: 0.375rem; /* rounded-md */
-            border: 1px solid #e5e7eb; /* border border-gray-200 */
-            /* REMOVED max-height and overflow-y */
-            color: #1f2937; /* text-gray-800 */
-        }
-        /* Styling for placeholder text when no data */
-        .text-content-placeholder {
-            font-style: italic;
-            color: #9ca3af; /* text-gray-400 */
-            font-size: 0.875rem; /* text-sm */
-            padding: 0.75rem 0; /* Add some padding */
-        }
-         /* CRC Status styling */
-        .crc-ok { color: #16a34a; font-weight: 500; } /* green-600 */
-        .crc-error { color: #dc2626; font-weight: 700; } /* red-600 */
-        /* Styling for chunks with CRC errors */
-        .chunk-container.error-chunk {
-             border-left: 4px solid #ef4444; /* border-l-4 border-red-500 */
-             background-color: #fffbeb; /* bg-yellow-50 - subtle highlight */
-        }
-         /* Style for the main message area */
-        #message.text-green-600 { color: #059669; }
-        #message.text-yellow-600 { color: #d97706; }
-        #message.text-red-600 { color: #dc2626; }
-        .hidden { display: none; }
+        body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f5f9; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
     </style>
 </head>
-<body class="font-sans bg-gray-100 text-gray-800 p-4 md:p-8">
+<body class="text-slate-800 antialiased min-h-screen flex flex-col">
 
-    <div class="max-w-6xl mx-auto bg-white p-6 rounded-lg shadow-lg">
-        <h1 class="text-2xl font-bold mb-6 text-center text-gray-700">PNG File Chunk Inspector</h1>
-
-        <div class="mb-4">
-            <label for="input-file" class="block text-sm font-medium text-gray-700 mb-1">Select PNG file:</label>
-            <input type="file" id="input-file" accept=".png,image/png" class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 border border-gray-300 rounded-md cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"/>
-        </div>
-
-        <div class="text-center mb-4">
-             <button id="analyze-button" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md transition duration-150 ease-in-out shadow-sm">Analyze PNG</button>
-        </div>
-
-        <div id="message" class="mt-4 mb-6 text-center text-sm font-medium min-h-[1.25rem]"></div>
-
-        <div id="chunk-results-container" class="mt-6">
+    <!-- Header -->
+    <header class="bg-white border-b border-slate-200 sticky top-0 z-10">
+        <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="bg-blue-600 text-white p-1.5 rounded-lg">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                </div>
+                <h1 class="text-lg font-bold text-slate-900 tracking-tight">PNG Metadata Auditor</h1>
             </div>
-    </div>
+            <div class="text-xs font-medium text-slate-500 bg-slate-100 px-3 py-1 rounded-full">v2.0</div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="flex-grow w-full max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+
+        <!-- Upload Section -->
+        <div class="mb-10">
+            <div id="drop-zone" class="relative group border-2 border-dashed border-slate-300 rounded-xl bg-white p-8 transition-all hover:border-blue-400 hover:bg-slate-50 text-center cursor-pointer">
+                <input type="file" id="input-file" accept=".png,image/png" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-20" />
+                
+                <div class="space-y-4 pointer-events-none">
+                    <div class="w-12 h-12 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mx-auto transition-transform group-hover:scale-110">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path></svg>
+                    </div>
+                    <div>
+                        <p class="text-base font-medium text-slate-700">Drop your PNG file here, or click to browse</p>
+                        <p class="text-sm text-slate-400 mt-1">Supports standard PNG, APNG, and complex metadata</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="mt-4 flex justify-center">
+                <button id="analyze-button" class="bg-slate-900 hover:bg-slate-800 text-white font-medium py-2.5 px-6 rounded-lg shadow-sm transition-all active:scale-95 flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                    Analyze File
+                </button>
+            </div>
+        </div>
+
+        <!-- Status Message -->
+        <div id="message" class="hidden"></div>
+
+        <!-- Dashboard (Found/Missing) -->
+        <div id="dashboard-container"></div>
+
+        <!-- Chunk Inspector -->
+        <div id="chunk-results-container"></div>
+
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-white border-t border-slate-200 mt-auto">
+        <div class="max-w-5xl mx-auto px-4 py-6 flex justify-between items-center text-sm text-slate-500">
+            <p>&copy; 2025 Metadata Tools</p>
+            <p>Runs locally in your browser</p>
+        </div>
+    </footer>
 
     <script src="png.js"></script>
-
 </body>
 </html>
